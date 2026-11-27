@@ -290,7 +290,8 @@ static int boot_ctl_set_active_slot_for_partitions(vector<string> part_list,
 		unsigned slot)
 {
 	char buf[PATH_MAX] = {0};
-	struct gpt_disk *disk = NULL;
+	struct gpt_disk *diskA = NULL;
+	struct gpt_disk *diskB = NULL;
 	char slotA[MAX_GPT_NAME_SIZE + 1] = {0};
 	char slotB[MAX_GPT_NAME_SIZE + 1] = {0};
 	char active_guid[TYPE_GUID_SIZE + 1] = {0};
@@ -333,19 +334,28 @@ static int boot_ctl_set_active_slot_for_partitions(vector<string> part_list,
 				AB_SLOT_A_SUFFIX);
 		snprintf(slotB, sizeof(slotB) - 1,"%s%s", prefix.c_str(),
 				AB_SLOT_B_SUFFIX);
-		//Get the disk containing the partitions that were passed in.
-		//All partitions passed in must lie on the same disk.
-		if (!disk) {
-			disk = boot_ctl_get_disk_info(slotA);
-			if (!disk)
+		//Get the disk(s) containing the _a and _b partitions.
+		//On some UFS targets (e.g. Motorola), _a and _b live on separate LUNs.
+		if (!diskA) {
+			diskA = boot_ctl_get_disk_info(slotA);
+			if (!diskA)
 				goto error;
+		}
+		if (!diskB) {
+			diskB = boot_ctl_get_disk_info(slotB);
+			if (!diskB)
+				goto error;
+			if (!strcmp(diskA->devpath, diskB->devpath)) {
+				gpt_disk_free(diskB);
+				diskB = diskA;
+			}
 		}
 		//Get partition entry for slot A & B from the primary
 		//and backup tables.
-		pentryA = gpt_disk_get_pentry(disk, slotA, PRIMARY_GPT);
-		pentryA_bak = gpt_disk_get_pentry(disk, slotA, SECONDARY_GPT);
-		pentryB = gpt_disk_get_pentry(disk, slotB, PRIMARY_GPT);
-		pentryB_bak = gpt_disk_get_pentry(disk, slotB, SECONDARY_GPT);
+		pentryA = gpt_disk_get_pentry(diskA, slotA, PRIMARY_GPT);
+		pentryA_bak = gpt_disk_get_pentry(diskA, slotA, SECONDARY_GPT);
+		pentryB = gpt_disk_get_pentry(diskB, slotB, PRIMARY_GPT);
+		pentryB_bak = gpt_disk_get_pentry(diskB, slotB, SECONDARY_GPT);
 		if ( !pentryA || !pentryA_bak || !pentryB || !pentryB_bak) {
 			//None of these should be NULL since we have already
 			//checked for A & B versions earlier.
@@ -398,27 +408,40 @@ static int boot_ctl_set_active_slot_for_partitions(vector<string> part_list,
 			ALOGE("%s: Unknown slot suffix!", __func__);
 			goto error;
 		}
-		if (disk) {
-			if (gpt_disk_update_crc(disk) != 0) {
-				ALOGE("%s: Failed to update gpt_disk crc",
-						__func__);
-				goto error;
-			}
+		if (diskA && gpt_disk_update_crc(diskA) != 0) {
+			ALOGE("%s: Failed to update gpt_diskA crc",
+					__func__);
+			goto error;
+		}
+		if (diskB && diskB != diskA && gpt_disk_update_crc(diskB) != 0) {
+			ALOGE("%s: Failed to update gpt_diskB crc",
+					__func__);
+			goto error;
 		}
 	}
 	//write updated content to disk
-	if (disk) {
-		if (gpt_disk_commit(disk)) {
-			ALOGE("Failed to commit disk entry");
+	if (diskA) {
+		if (gpt_disk_commit(diskA)) {
+			ALOGE("Failed to commit diskA entry");
 			goto error;
 		}
-		gpt_disk_free(disk);
 	}
+	if (diskB && diskB != diskA) {
+		if (gpt_disk_commit(diskB)) {
+			ALOGE("Failed to commit diskB entry");
+			goto error;
+		}
+		gpt_disk_free(diskB);
+	}
+	if (diskA)
+		gpt_disk_free(diskA);
 	return 0;
 
 error:
-	if (disk)
-		gpt_disk_free(disk);
+	if (diskB && diskB != diskA)
+		gpt_disk_free(diskB);
+	if (diskA)
+		gpt_disk_free(diskA);
 	return -1;
 }
 
